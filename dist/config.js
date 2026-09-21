@@ -1,12 +1,15 @@
 // config.ts - Config loading with import support
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import stripJsonComments from "strip-json-comments";
 import { getAgentPath, getConfigDirName } from "./agent-dir.js";
 import { getAgentPluginSummaries, loadAgentPluginConfigs } from "./agent-plugin-loader.js";
+import { cloneBuiltInAgentPluginEntry, isBuiltInAgentPlugin, mergeBuiltInAgentPluginEntries } from "./agent-plugin-provenance.js";
 import { loadClaudePluginBundles } from "./claude-plugin-loader.js";
 import { loadPackageMcpConfigs } from "./package-mcp-loader.js";
+import { validateJevSettings } from "./jev-client.js";
 import { formatServerNamespace, isServerDisabled } from "./types.js";
 import { parseJsonWithComments, toStringRecord } from "./utils.js";
 const GENERIC_GLOBAL_CONFIG_PATH = join(homedir(), ".config", "mcp", "mcp.json");
@@ -198,7 +201,13 @@ export function getMcpDiscoverySummary(overridePath, cwd = process.cwd(), option
     };
 }
 export function cloneMcpConfig(config) {
-    return structuredClone(config);
+    const cloned = structuredClone(config);
+    for (const [name, source] of Object.entries(config.mcpServers)) {
+        const builtInClone = cloneBuiltInAgentPluginEntry(source);
+        if (builtInClone)
+            cloned.mcpServers[name] = builtInClone;
+    }
+    return cloned;
 }
 export function loadMcpConfig(overridePath, cwd = process.cwd()) {
     const sourceSpecs = getConfigSources(overridePath, cwd);
@@ -365,6 +374,43 @@ function getConfigSources(overridePath, cwd = process.cwd()) {
         shared: false,
         scope: "global",
     });
+    // Compare file identities so symlink aliases cannot reload a global source
+    // at ancestor precedence. Keep original paths for display and writes.
+    const reservedPaths = new Set([
+        ...sources.map((source) => getConfigPathIdentity(source.readPath)),
+        getConfigPathIdentity(projectPath),
+        getConfigPathIdentity(projectPiPath),
+    ]);
+    // Only user-global files (including an explicit override) may opt in to
+    // ancestor discovery. Project files cannot extend this trust boundary.
+    const ancestorSources = new Map();
+    const descriptors = [
+        { id: "shared-project-ancestor", label: "ancestor standard MCP", path: getProjectConfigPath, shared: true },
+        { id: "pi-project-ancestor", label: "ancestor Pi override", path: getProjectPiConfigPath, shared: false },
+    ];
+    const ancestorRoot = getConfiguredAncestorRoot(sources, cwd);
+    if (ancestorRoot) {
+        for (const dir of getAncestorProjectDirs(cwd, ancestorRoot)) {
+            for (const descriptor of descriptors) {
+                const path = descriptor.path(dir);
+                const identity = getConfigPathIdentity(path);
+                if (reservedPaths.has(identity) || !existsSync(path))
+                    continue;
+                // Reinsert aliases at their nearest precedence position.
+                ancestorSources.delete(identity);
+                ancestorSources.set(identity, {
+                    id: descriptor.id,
+                    label: descriptor.label,
+                    readPath: path,
+                    writePath: path,
+                    kind: "project",
+                    shared: descriptor.shared,
+                    scope: "project",
+                });
+            }
+        }
+    }
+    sources.push(...ancestorSources.values());
     if (projectPath !== userPath) {
         sources.push({
             id: "shared-project",
@@ -388,6 +434,70 @@ function getConfigSources(overridePath, cwd = process.cwd()) {
         });
     }
     return sources;
+}
+function getConfigPathIdentity(path) {
+    try {
+        return realpathSync(path);
+    }
+    catch {
+        // Missing or inaccessible paths still participate in lexical deduplication.
+        return resolve(path);
+    }
+}
+function isWithin(base, target) {
+    const path = relative(base, target);
+    return path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+}
+function getConfiguredAncestorRoot(globalSources, cwd) {
+    let configured;
+    for (const source of globalSources) {
+        const roots = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`)?.settings?.ancestorConfigRoots;
+        if (roots !== undefined)
+            configured = roots;
+    }
+    if (configured === undefined || (Array.isArray(configured) && configured.length === 0))
+        return undefined;
+    if (!Array.isArray(configured)) {
+        console.warn("Invalid settings.ancestorConfigRoots: expected an array of paths");
+        return undefined;
+    }
+    const home = getConfigPathIdentity(resolve(homedir()));
+    const canonicalCwd = getConfigPathIdentity(resolve(cwd));
+    const valid = [];
+    for (const entry of configured) {
+        const expanded = typeof entry === "string" && entry.startsWith("~/")
+            ? join(homedir(), entry.slice(2))
+            : entry;
+        if (typeof expanded !== "string" || !isAbsolute(expanded)) {
+            console.warn(`Invalid settings.ancestorConfigRoots entry ${JSON.stringify(entry)}: expected an absolute path or ~/...`);
+            continue;
+        }
+        try {
+            const root = realpathSync(expanded);
+            if (!statSync(root).isDirectory() || !isWithin(home, root) || !isWithin(root, canonicalCwd))
+                throw new Error();
+            valid.push(root);
+        }
+        catch {
+            console.warn(`Invalid settings.ancestorConfigRoots entry ${JSON.stringify(entry)}: expected an existing directory under HOME containing cwd`);
+        }
+    }
+    return valid.sort((left, right) => right.length - left.length)[0];
+}
+function getAncestorProjectDirs(cwd, root) {
+    const start = getConfigPathIdentity(resolve(cwd));
+    const dirs = [];
+    let current = dirname(start);
+    while (isWithin(root, current)) {
+        dirs.unshift(current);
+        if (current === root)
+            break;
+        const parent = dirname(current);
+        if (parent === current)
+            break;
+        current = parent;
+    }
+    return dirs;
 }
 function isExclusiveConfigMode() {
     return process.env.PI_MCP_CONFIG_MODE?.trim().toLowerCase() === "exclusive";
@@ -428,7 +538,7 @@ function mergeServerMaps(base, next) {
             baseEntry = { ...existing };
             for (const field of [
                 "url", "headers", "requestHeadersCommand", "caFile", "auth", "bearerToken",
-                "bearerTokenEnv", "oauth", "httpTransport", "socket",
+                "bearerTokenEnv", "bearerTokenStore", "oauth", "httpTransport", "socket",
             ]) {
                 delete baseEntry[field];
             }
@@ -446,7 +556,7 @@ function mergeServerMaps(base, next) {
             for (const field of [
                 "command", "args", "env", "cwd", "pluginDataDir", "literalEnv", "inheritEnv", "url",
                 "headers", "requestHeadersCommand", "caFile", "auth", "bearerToken", "bearerTokenEnv",
-                "oauth", "httpTransport",
+                "bearerTokenStore", "oauth", "httpTransport",
             ]) {
                 delete baseEntry[field];
             }
@@ -461,7 +571,12 @@ function mergeServerMaps(base, next) {
                 delete baseEntry.oauth;
             }
         }
-        merged[name] = { ...baseEntry, ...definition };
+        if (existing && Object.hasOwn(definition, "env") && isBuiltInAgentPlugin(existing, "env") && !Object.hasOwn(definition, "literalEnv")) {
+            if (baseEntry === existing)
+                baseEntry = { ...existing };
+            delete baseEntry.literalEnv;
+        }
+        merged[name] = mergeBuiltInAgentPluginEntries(baseEntry, definition);
     }
     return merged;
 }
@@ -565,7 +680,10 @@ function readValidatedConfig(path, label) {
     if (!existsSync(path))
         return null;
     try {
-        return validateConfig(parseJsonWithComments(readFileSync(path, "utf-8")));
+        const text = readFileSync(path, "utf-8");
+        if (stripJsonComments(text, { trailingCommas: true }).trim() === "")
+            return null;
+        return validateConfig(parseJsonWithComments(text));
     }
     catch (error) {
         console.warn(`Failed to load ${label}:`, error);
@@ -579,9 +697,19 @@ function validateConfig(raw) {
     return {
         mcpServers: toServerEntries(raw.mcpServers ?? raw["mcp-servers"]),
         ...(Array.isArray(raw.imports) ? { imports: raw.imports } : {}),
-        ...(raw.settings !== undefined ? { settings: raw.settings } : {}),
+        ...(raw.settings !== undefined ? { settings: parseSettings(raw.settings) } : {}),
         ...(raw.claudePlugins !== undefined ? { claudePlugins: parseClaudePlugins(raw.claudePlugins) } : {}),
     };
+}
+function parseSettings(value) {
+    if (!isRecord(value))
+        throw new Error("settings must be an object");
+    const settings = { ...value };
+    if (value.jev !== undefined) {
+        validateJevSettings(value.jev);
+        settings.jev = value.jev;
+    }
+    return settings;
 }
 function parseClaudePlugins(value) {
     if (!Array.isArray(value)) {
@@ -739,6 +867,7 @@ function extractServers(config, kind) {
                     mapped.oauth = {
                         ...(typeof oauth.clientId === "string" ? { clientId: oauth.clientId } : {}),
                         ...(typeof oauth.clientSecret === "string" ? { clientSecret: oauth.clientSecret } : {}),
+                        ...(typeof oauth.clientMetadataUrl === "string" ? { clientMetadataUrl: oauth.clientMetadataUrl } : {}),
                         ...(typeof oauth.scope === "string" ? { scope: oauth.scope } : {}),
                         ...(typeof oauth.authServerMetadataUrl === "string" ? { authServerMetadataUrl: oauth.authServerMetadataUrl } : {}),
                         ...(typeof oauth.skipIssuerMetadataValidation === "boolean"
@@ -852,11 +981,37 @@ function readRawConfigObject(filePath) {
         return {};
     }
 }
+function writeConfigText(writePath, text) {
+    let mode;
+    try {
+        writePath = realpathSync(writePath);
+        mode = statSync(writePath).mode & 0o777;
+    }
+    catch { }
+    mkdirSync(dirname(writePath), { recursive: true });
+    const tmpPath = `${writePath}.${process.pid}.tmp`;
+    rmSync(tmpPath, { force: true });
+    try {
+        writeFileSync(tmpPath, text, mode === undefined ? "utf-8" : { encoding: "utf-8", mode });
+        if (mode !== undefined)
+            chmodSync(tmpPath, mode);
+        renameSync(tmpPath, writePath);
+    }
+    catch (error) {
+        try {
+            rmSync(tmpPath, { force: true });
+        }
+        catch { }
+        throw error;
+    }
+}
 function writeRawConfigObject(filePath, raw) {
-    mkdirSync(dirname(filePath), { recursive: true });
-    const tmpPath = `${filePath}.${process.pid}.tmp`;
-    writeFileSync(tmpPath, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
-    renameSync(tmpPath, filePath);
+    writeConfigText(filePath, `${JSON.stringify(raw, null, 2)}\n`);
+}
+export function writeSharedConfigText(filePath, text) {
+    if (!isRecord(parseJsonWithComments(text)))
+        throw new Error("top-level value must be an object");
+    writeConfigText(filePath, text);
 }
 function getServersObject(raw) {
     const existing = raw.mcpServers ?? raw["mcp-servers"] ?? {};

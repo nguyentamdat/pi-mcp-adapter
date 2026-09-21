@@ -1,12 +1,15 @@
 // config.ts - Config loading with import support
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import stripJsonComments from "strip-json-comments";
 import { getAgentPath, getConfigDirName } from "./agent-dir.ts";
 import { getAgentPluginSummaries, loadAgentPluginConfigs, type AgentPluginSummary } from "./agent-plugin-loader.ts";
+import { cloneBuiltInAgentPluginEntry, isBuiltInAgentPlugin, mergeBuiltInAgentPluginEntries } from "./agent-plugin-provenance.ts";
 import { loadClaudePluginBundles } from "./claude-plugin-loader.ts";
 import { loadPackageMcpConfigs } from "./package-mcp-loader.ts";
+import { validateJevSettings } from "./jev-client.ts";
 import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type ServerEntry, type McpSettings, type ImportKind, type ServerProvenance } from "./types.ts";
 import { parseJsonWithComments, toStringRecord } from "./utils.ts";
 
@@ -93,7 +96,7 @@ const IMPORT_PATHS: Record<ImportKind, string[]> = {
 };
 
 interface ConfigSourceSpec {
-  id: "shared-global" | "agents-global" | "agents-nested-global" | "pi-global" | "shared-project" | "pi-project";
+  id: "shared-global" | "agents-global" | "agents-nested-global" | "pi-global" | "shared-project-ancestor" | "pi-project-ancestor" | "shared-project" | "pi-project";
   label: string;
   readPath: string;
   writePath: string;
@@ -312,7 +315,12 @@ export function getMcpDiscoverySummary(
 }
 
 export function cloneMcpConfig(config: McpConfig): McpConfig {
-  return structuredClone(config);
+  const cloned = structuredClone(config);
+  for (const [name, source] of Object.entries(config.mcpServers)) {
+    const builtInClone = cloneBuiltInAgentPluginEntry(source);
+    if (builtInClone) cloned.mcpServers[name] = builtInClone;
+  }
+  return cloned;
 }
 
 export function loadMcpConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
@@ -502,6 +510,43 @@ function getConfigSources(overridePath?: string, cwd = process.cwd()): ConfigSou
     scope: "global",
   });
 
+  // Compare file identities so symlink aliases cannot reload a global source
+  // at ancestor precedence. Keep original paths for display and writes.
+  const reservedPaths = new Set([
+    ...sources.map((source) => getConfigPathIdentity(source.readPath)),
+    getConfigPathIdentity(projectPath),
+    getConfigPathIdentity(projectPiPath),
+  ]);
+  // Only user-global files (including an explicit override) may opt in to
+  // ancestor discovery. Project files cannot extend this trust boundary.
+  const ancestorSources = new Map<string, ConfigSourceSpec>();
+  const descriptors = [
+    { id: "shared-project-ancestor", label: "ancestor standard MCP", path: getProjectConfigPath, shared: true },
+    { id: "pi-project-ancestor", label: "ancestor Pi override", path: getProjectPiConfigPath, shared: false },
+  ] as const;
+  const ancestorRoot = getConfiguredAncestorRoot(sources, cwd);
+  if (ancestorRoot) {
+    for (const dir of getAncestorProjectDirs(cwd, ancestorRoot)) {
+      for (const descriptor of descriptors) {
+        const path = descriptor.path(dir);
+        const identity = getConfigPathIdentity(path);
+        if (reservedPaths.has(identity) || !existsSync(path)) continue;
+        // Reinsert aliases at their nearest precedence position.
+        ancestorSources.delete(identity);
+        ancestorSources.set(identity, {
+          id: descriptor.id,
+          label: descriptor.label,
+          readPath: path,
+          writePath: path,
+          kind: "project",
+          shared: descriptor.shared,
+          scope: "project",
+        });
+      }
+    }
+  }
+  sources.push(...ancestorSources.values());
+
   if (projectPath !== userPath) {
     sources.push({
       id: "shared-project",
@@ -527,6 +572,68 @@ function getConfigSources(overridePath?: string, cwd = process.cwd()): ConfigSou
   }
 
   return sources;
+}
+
+function getConfigPathIdentity(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    // Missing or inaccessible paths still participate in lexical deduplication.
+    return resolve(path);
+  }
+}
+
+function isWithin(base: string, target: string): boolean {
+  const path = relative(base, target);
+  return path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+}
+
+function getConfiguredAncestorRoot(globalSources: ConfigSourceSpec[], cwd: string): string | undefined {
+  let configured: unknown;
+  for (const source of globalSources) {
+    const roots = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`)?.settings?.ancestorConfigRoots;
+    if (roots !== undefined) configured = roots;
+  }
+  if (configured === undefined || (Array.isArray(configured) && configured.length === 0)) return undefined;
+  if (!Array.isArray(configured)) {
+    console.warn("Invalid settings.ancestorConfigRoots: expected an array of paths");
+    return undefined;
+  }
+
+  const home = getConfigPathIdentity(resolve(homedir()));
+  const canonicalCwd = getConfigPathIdentity(resolve(cwd));
+  const valid: string[] = [];
+  for (const entry of configured) {
+    const expanded = typeof entry === "string" && entry.startsWith("~/")
+      ? join(homedir(), entry.slice(2))
+      : entry;
+    if (typeof expanded !== "string" || !isAbsolute(expanded)) {
+      console.warn(`Invalid settings.ancestorConfigRoots entry ${JSON.stringify(entry)}: expected an absolute path or ~/...`);
+      continue;
+    }
+    try {
+      const root = realpathSync(expanded);
+      if (!statSync(root).isDirectory() || !isWithin(home, root) || !isWithin(root, canonicalCwd)) throw new Error();
+      valid.push(root);
+    } catch {
+      console.warn(`Invalid settings.ancestorConfigRoots entry ${JSON.stringify(entry)}: expected an existing directory under HOME containing cwd`);
+    }
+  }
+  return valid.sort((left, right) => right.length - left.length)[0];
+}
+
+function getAncestorProjectDirs(cwd: string, root: string): string[] {
+  const start = getConfigPathIdentity(resolve(cwd));
+  const dirs: string[] = [];
+  let current = dirname(start);
+  while (isWithin(root, current)) {
+    dirs.unshift(current);
+    if (current === root) break;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return dirs;
 }
 
 function isExclusiveConfigMode(): boolean {
@@ -574,7 +681,7 @@ function mergeServerMaps(
       baseEntry = { ...existing };
       for (const field of [
         "url", "headers", "requestHeadersCommand", "caFile", "auth", "bearerToken",
-        "bearerTokenEnv", "oauth", "httpTransport", "socket",
+        "bearerTokenEnv", "bearerTokenStore", "oauth", "httpTransport", "socket",
       ] as const) {
         delete baseEntry[field];
       }
@@ -590,7 +697,7 @@ function mergeServerMaps(
       for (const field of [
         "command", "args", "env", "cwd", "pluginDataDir", "literalEnv", "inheritEnv", "url",
         "headers", "requestHeadersCommand", "caFile", "auth", "bearerToken", "bearerTokenEnv",
-        "oauth", "httpTransport",
+        "bearerTokenStore", "oauth", "httpTransport",
       ] as const) {
         delete baseEntry[field];
       }
@@ -604,7 +711,11 @@ function mergeServerMaps(
         delete baseEntry.oauth;
       }
     }
-    merged[name] = { ...baseEntry, ...definition };
+    if (existing && Object.hasOwn(definition, "env") && isBuiltInAgentPlugin(existing, "env") && !Object.hasOwn(definition, "literalEnv")) {
+      if (baseEntry === existing) baseEntry = { ...existing };
+      delete baseEntry.literalEnv;
+    }
+    merged[name] = mergeBuiltInAgentPluginEntries(baseEntry, definition);
   }
   return merged;
 }
@@ -719,7 +830,9 @@ function readValidatedConfig(path: string, label: string): McpConfig | null {
   if (!existsSync(path)) return null;
 
   try {
-    return validateConfig(parseJsonWithComments(readFileSync(path, "utf-8")));
+    const text = readFileSync(path, "utf-8");
+    if (stripJsonComments(text, { trailingCommas: true }).trim() === "") return null;
+    return validateConfig(parseJsonWithComments(text));
   } catch (error) {
     console.warn(`Failed to load ${label}:`, error);
     return null;
@@ -734,9 +847,19 @@ function validateConfig(raw: unknown): McpConfig {
   return {
     mcpServers: toServerEntries(raw.mcpServers ?? raw["mcp-servers"]),
     ...(Array.isArray(raw.imports) ? { imports: raw.imports as ImportKind[] } : {}),
-    ...(raw.settings !== undefined ? { settings: raw.settings as McpSettings } : {}),
+    ...(raw.settings !== undefined ? { settings: parseSettings(raw.settings) } : {}),
     ...(raw.claudePlugins !== undefined ? { claudePlugins: parseClaudePlugins(raw.claudePlugins) } : {}),
   };
+}
+
+function parseSettings(value: unknown): McpSettings {
+  if (!isRecord(value)) throw new Error("settings must be an object");
+  const settings = { ...value } as McpSettings;
+  if (value.jev !== undefined) {
+    validateJevSettings(value.jev);
+    settings.jev = value.jev as NonNullable<McpSettings["jev"]>;
+  }
+  return settings;
 }
 
 function parseClaudePlugins(value: unknown): ClaudePluginConfig[] {
@@ -905,6 +1028,7 @@ function extractServers(config: unknown, kind: ImportKind): Record<string, Serve
           mapped.oauth = {
             ...(typeof oauth.clientId === "string" ? { clientId: oauth.clientId } : {}),
             ...(typeof oauth.clientSecret === "string" ? { clientSecret: oauth.clientSecret } : {}),
+            ...(typeof oauth.clientMetadataUrl === "string" ? { clientMetadataUrl: oauth.clientMetadataUrl } : {}),
             ...(typeof oauth.scope === "string" ? { scope: oauth.scope } : {}),
             ...(typeof oauth.authServerMetadataUrl === "string" ? { authServerMetadataUrl: oauth.authServerMetadataUrl } : {}),
             ...(typeof oauth.skipIssuerMetadataValidation === "boolean"
@@ -1026,11 +1150,32 @@ function readRawConfigObject(filePath: string): Record<string, unknown> {
   }
 }
 
+function writeConfigText(writePath: string, text: string): void {
+  let mode: number | undefined;
+  try {
+    writePath = realpathSync(writePath);
+    mode = statSync(writePath).mode & 0o777;
+  } catch {}
+  mkdirSync(dirname(writePath), { recursive: true });
+  const tmpPath = `${writePath}.${process.pid}.tmp`;
+  rmSync(tmpPath, { force: true });
+  try {
+    writeFileSync(tmpPath, text, mode === undefined ? "utf-8" : { encoding: "utf-8", mode });
+    if (mode !== undefined) chmodSync(tmpPath, mode);
+    renameSync(tmpPath, writePath);
+  } catch (error) {
+    try { rmSync(tmpPath, { force: true }); } catch {}
+    throw error;
+  }
+}
+
 function writeRawConfigObject(filePath: string, raw: Record<string, unknown>): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
-  renameSync(tmpPath, filePath);
+  writeConfigText(filePath, `${JSON.stringify(raw, null, 2)}\n`);
+}
+
+export function writeSharedConfigText(filePath: string, text: string): void {
+  if (!isRecord(parseJsonWithComments(text))) throw new Error("top-level value must be an object");
+  writeConfigText(filePath, text);
 }
 
 function getServersObject(raw: Record<string, unknown>): Record<string, ServerEntry> {

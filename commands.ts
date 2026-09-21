@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { OverlayHandle } from "@earendil-works/pi-tui";
 import type { McpExtensionState } from "./state.ts";
@@ -16,6 +17,7 @@ import {
   writeDirectToolsConfig,
   writeProjectServerDisabledOverride,
   writeSharedServerEntry,
+  writeSharedConfigText,
   writeStarterSharedConfig,
 } from "./config.ts";
 import { markKeepAliveAfterConnect, notifyToolMetadataUpdated, updateMetadataCache, updateStatusBar, getFailureAgeSeconds, getFailureMessage, clearFailure, recordFailure } from "./init.ts";
@@ -26,7 +28,7 @@ import { supportsOAuth, authenticate, removeAuth, type McpOAuthRuntime } from ".
 import { getAuthStorageOptions, inspectAuthForUrl } from "./mcp-auth.ts";
 import { inspectBearerTokenForUrl, removeBearerToken } from "./mcp-bearer-store.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
-import { openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
+import { formatTerminalError, openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
 import { isAbortError } from "./runtime-owner.ts";
 
 function terminalHyperlink(label: string, url: string): string {
@@ -44,6 +46,21 @@ function terminalHyperlink(label: string, url: string): string {
  */
 function canRenderPanel(ctx: ExtensionContext): boolean {
   return ctx.hasUI && ctx.mode === "tui";
+}
+
+export async function editSharedConfig(ctx: ExtensionContext, target: SharedConfigTarget): Promise<boolean> {
+  if (!ctx.hasUI) return false;
+  const path = getSharedConfigPath(target, ctx.cwd);
+  const before = existsSync(path) ? readFileSync(path, "utf8") : '{\n  "mcpServers": {}\n}\n';
+  const after = await ctx.ui.editor(`Edit ${path} (Ctrl+G opens $EDITOR)`, before);
+  if (after === undefined || after === before) return false;
+  try {
+    writeSharedConfigText(path, after);
+  } catch (error) {
+    ctx.ui.notify(`MCP: not saved: ${formatTerminalError(error)}`, "error");
+    return false;
+  }
+  return true;
 }
 
 export async function showStatus(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
@@ -194,11 +211,11 @@ export async function reconnectServer(
   }
 
   try {
-    await state.manager.close(name);
     state.owner?.throwIfInactive();
-    const connection = signal
-      ? await state.manager.connect(name, definition, signal)
-      : await state.manager.connect(name, definition);
+    const current = state.manager.getConnection(name);
+    const connection = current
+      ? await state.manager.reconnect(name, definition, current, signal)
+      : await state.manager.connect(name, definition, signal);
     state.owner?.throwIfInactive();
     if (connection.status === "needs-auth") {
       if (ui) {
@@ -311,9 +328,9 @@ export async function authenticateServer(
     }
 
     ui.setStatus("mcp-auth", `Authenticating ${serverName}...`);
-    const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
+    const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd, config.settings?.oauthCredentialStore);
     const status = await authenticate(serverName, serverUrl, definition, {
-      ...(authStorageOptions.baseDir ? { authStorageOptions } : {}),
+      ...(Object.keys(authStorageOptions).length > 0 ? { authStorageOptions } : {}),
       onAuthorizationUrl: () => {},
       onAuthorizationInput: async (authorizationUrl, inputSignal) => {
         if (inputSignal.aborted) return undefined;
@@ -365,12 +382,23 @@ export async function logoutServer(
   const signal = state.owner?.signal;
   try {
     await state.manager.close(serverName);
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    if (ui) {
+      ui.notify(`Failed to close OAuth server "${serverName}"; credentials were not cleared: ${sanitizeTerminalText(message)}`, "error");
+    }
+    return { ok: false, message };
+  }
+
+  state.owner?.throwIfInactive();
+  try {
     await removeAuth(serverName, { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime });
   } catch (error) {
     if (isAbortError(error, signal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     if (ui) {
-      ui.notify(`Failed to disconnect or clear OAuth credentials for "${serverName}": ${sanitizeTerminalText(message)}`, "error");
+      ui.notify(`Failed to clear OAuth credentials for "${serverName}": ${sanitizeTerminalText(message)}`, "error");
     }
     return { ok: false, message };
   }
@@ -460,7 +488,7 @@ function buildSharedConfigNoticeLines(configOverridePath: string | undefined, cw
   const discovery = getMcpStandardConfigSummary(configOverridePath, cwd);
   const onboardingState = loadOnboardingState();
   const sharedSources = discovery.sources.filter((source) =>
-    (source.id === "shared-project" || source.id === "shared-global") && source.serverCount > 0,
+    (source.id === "shared-project" || source.id === "shared-project-ancestor" || source.id === "shared-global") && source.serverCount > 0,
   );
   if (sharedSources.length === 0 || onboardingState.sharedConfigHintShown) {
     return { lines: [], fingerprint: null };
