@@ -3,6 +3,7 @@ import { formatWithOptions } from "node:util";
 import { Worker } from "node:worker_threads";
 import { throwIfAborted } from "./abort.ts";
 import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from "./mcp-output-guard.ts";
+import { loadMcpScriptWasm } from "./mcp-script-wasm.ts";
 import { evaluateJev, validateJevSettings } from "./jev-client.ts";
 import type { JevErrorCode, JevEvaluateInput, JevEvaluationEnvelope } from "./jev-contracts.ts";
 import { executeCall } from "./proxy-modes.ts";
@@ -17,6 +18,7 @@ import type { ContentBlock } from "./types.ts";
 
 export const DEFAULT_MCP_SCRIPT_TIMEOUT_MS = 30_000;
 const MCP_SCRIPT_INTERMEDIATE_MAX_BYTES = 16 * 1024 * 1024;
+const MCP_SCRIPT_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
 
 class McpScriptTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -134,6 +136,7 @@ export async function runMcpScript(
     ? Math.floor(timeoutMs)
     : DEFAULT_MCP_SCRIPT_TIMEOUT_MS;
   const output: ContentBlock[] = [];
+  let outputBytes = 0;
   const externalSignal = combineAbortSignals(state.owner?.signal, signal);
   const timeoutController = new AbortController();
   const callSignal = combineAbortSignals(externalSignal, timeoutController.signal);
@@ -213,7 +216,7 @@ export async function runMcpScript(
   let evaluationAttempts = 0;
   let evaluationBytes = 0;
   let evaluationTokensRemaining = jevSettings.maxEvaluationTokensPerScript;
-  const tokenBudgetExhausted = (): JevEvaluationEnvelope => ({ ok: false, error: { code: "budget_exhausted", message: "TypeSafe evaluation token budget exhausted." } });
+  const tokenBudgetExhausted = (): JevEvaluationEnvelope => ({ ok: false, error: { code: "budget_exhausted", message: "Jev evaluation token budget exhausted." } });
   const chargeEvaluationTokens = (envelope: JevEvaluationEnvelope): JevEvaluationEnvelope => {
     if (!envelope.ok) return envelope;
     const used = envelope.data.usage.inputTokens + envelope.data.usage.outputTokens;
@@ -226,16 +229,16 @@ export async function runMcpScript(
   };
   const admitEvaluation = (input: unknown): JevEvaluationEnvelope | undefined => {
     if (++evaluationAttempts > jevSettings.maxEvaluationsPerScript) {
-      return { ok: false, error: { code: "budget_exhausted", message: "TypeSafe evaluation count budget exhausted." } };
+      return { ok: false, error: { code: "budget_exhausted", message: "Jev evaluation count budget exhausted." } };
     }
     if (evaluationTokensRemaining === 0) return tokenBudgetExhausted();
     let serialized: string | undefined;
     try { serialized = JSON.stringify(input); }
-    catch { return { ok: false, error: { code: "invalid_request", message: "Invalid TypeSafe evaluation request." } }; }
-    if (serialized === undefined) return { ok: false, error: { code: "invalid_request", message: "Invalid TypeSafe evaluation request." } };
+    catch { return { ok: false, error: { code: "invalid_request", message: "Invalid Jev evaluation request." } }; }
+    if (serialized === undefined) return { ok: false, error: { code: "invalid_request", message: "Invalid Jev evaluation request." } };
     const bytes = Buffer.byteLength(serialized, "utf8");
     if (bytes > jevSettings.maxEvaluationBytesPerScript - evaluationBytes) {
-      return { ok: false, error: { code: "budget_exhausted", message: "TypeSafe evaluation byte budget exhausted." } };
+      return { ok: false, error: { code: "budget_exhausted", message: "Jev evaluation byte budget exhausted." } };
     }
     evaluationBytes += bytes;
     return undefined;
@@ -257,7 +260,7 @@ export async function runMcpScript(
     envelope = chargeEvaluationTokens(envelope);
     throwIfAborted(callSignal);
     if (!reserveIntermediateBytes(JSON.stringify(envelope))) {
-      envelope = { ok: false, error: { code: "budget_exhausted", message: "TypeSafe evaluation exceeds the remaining mcpScript intermediate transfer budget (16 MiB per script)." } };
+      envelope = { ok: false, error: { code: "budget_exhausted", message: "Jev evaluation exceeds the remaining mcpScript intermediate transfer budget (16 MiB per script)." } };
     }
     calls[index] = envelope.ok
       ? {
@@ -374,14 +377,38 @@ export async function runMcpScript(
   let removeAbortListener = () => {};
   let errorCode: "timeout" | "aborted" | "script_error" | undefined;
   let errorMessage: string | undefined;
+  const interrupt = new SharedArrayBuffer(4);
+  const interruptView = new Int32Array(interrupt);
+  const timeoutError = new McpScriptTimeoutError(resolvedTimeoutMs);
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      callsSnapshot = snapshotCalls();
+      timeoutController.abort(timeoutError);
+      Atomics.store(interruptView, 0, 1);
+      void worker?.terminate();
+      reject(timeoutError);
+    }, resolvedTimeoutMs);
+  });
+  const aborted = externalSignal
+    ? new Promise<never>((_resolve, reject) => {
+        const onAbort = () => {
+          callsSnapshot = snapshotCalls();
+          Atomics.store(interruptView, 0, 1);
+          void worker?.terminate();
+          reject(abortReasonError(externalSignal.reason));
+        };
+        if (externalSignal.aborted) onAbort();
+        else {
+          externalSignal.addEventListener("abort", onAbort, { once: true });
+          removeAbortListener = () => externalSignal.removeEventListener("abort", onAbort);
+        }
+      })
+    : new Promise<never>(() => {});
 
   try {
-    if (externalSignal?.aborted) {
-      throw abortReasonError(externalSignal.reason);
-    }
-
+    const wasm = await Promise.race([loadMcpScriptWasm(), timeout, aborted]);
     worker = new Worker(new URL("./mcp-script-worker.mjs", import.meta.url), {
-      workerData: { code },
+      workerData: { code, wasm, interrupt, outputMaxBytes: MCP_SCRIPT_OUTPUT_MAX_BYTES },
       env: {},
       // The sandbox cannot open files, and the host always terminates this worker.
       // Disable Node's unmanaged FD bookkeeping, which emits false warnings when
@@ -391,16 +418,36 @@ export async function runMcpScript(
     const activeWorker = worker;
     const execution = new Promise<void>((resolve, reject) => {
       let completed = false;
+      const retainOutput = (value: unknown): boolean => {
+        const block = toContentBlock(value);
+        const bytes = Buffer.byteLength(JSON.stringify(block), "utf8");
+        if (bytes > MCP_SCRIPT_OUTPUT_MAX_BYTES - outputBytes) return false;
+        outputBytes += bytes;
+        output.push(block);
+        return true;
+      };
+      const rejectOutputBudget = () => {
+        completed = true;
+        const error = new Error("mcpScript output exceeds the 16 MiB per-script budget");
+        callsSnapshot = snapshotCalls();
+        timeoutController.abort(error);
+        Atomics.store(interruptView, 0, 1);
+        void activeWorker.terminate();
+        reject(error);
+      };
       activeWorker.on("message", (value: unknown) => {
         const message = parseWorkerMessage(value);
         if (!message || completed) return;
         if (message.type === "emit") {
-          output.push(toContentBlock(message.block));
+          if (!retainOutput(message.block)) rejectOutputBudget();
           return;
         }
         if (message.type === "done") {
+          if ("returnBlock" in message && !retainOutput(message.returnBlock)) {
+            rejectOutputBudget();
+            return;
+          }
           completed = true;
-          if ("returnBlock" in message) output.push(toContentBlock(message.returnBlock));
           resolve();
           return;
         }
@@ -431,27 +478,6 @@ export async function runMcpScript(
         if (!completed && code !== 0) reject(new Error(`mcpScript worker exited with code ${code}`));
       });
     });
-    const timeoutError = new McpScriptTimeoutError(resolvedTimeoutMs);
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        callsSnapshot = snapshotCalls();
-        timeoutController.abort(timeoutError);
-        void activeWorker.terminate();
-        reject(timeoutError);
-      }, resolvedTimeoutMs);
-    });
-    const aborted = externalSignal
-      ? new Promise<never>((_resolve, reject) => {
-          const onAbort = () => {
-            callsSnapshot = snapshotCalls();
-            void activeWorker.terminate();
-            reject(abortReasonError(externalSignal.reason));
-          };
-          externalSignal.addEventListener("abort", onAbort, { once: true });
-          removeAbortListener = () => externalSignal.removeEventListener("abort", onAbort);
-        })
-      : new Promise<never>(() => {});
-
     await Promise.race([execution, timeout, aborted]);
   } catch (error) {
     if (error instanceof McpScriptTimeoutError) {
@@ -474,6 +500,7 @@ export async function runMcpScript(
     // A script may finish without awaiting every call; abort leftovers so
     // parent-side dispatches do not outlive the script.
     timeoutController.abort(new Error("mcpScript finished"));
+    Atomics.store(interruptView, 0, 1);
     await worker?.terminate();
   }
 

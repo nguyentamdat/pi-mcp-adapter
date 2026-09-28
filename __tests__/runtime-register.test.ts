@@ -62,6 +62,7 @@ vi.mock("../config.ts", () => ({
   cloneMcpConfig: mocks.cloneMcpConfig,
   discoverConfiguredClaudePluginSkills: mocks.discoverConfiguredClaudePluginSkills,
   resolveConfiguredClaudePluginMcp: mocks.resolveConfiguredClaudePluginMcp,
+  getLegacyMcpMigrationNotices: vi.fn(() => []),
   writeProjectServerDisabledOverride: mocks.writeProjectServerDisabledOverride,
 }));
 
@@ -71,6 +72,7 @@ vi.mock("../metadata-cache.ts", () => ({
 
 vi.mock("../direct-tool-surface.ts", () => ({
   buildProxyDescription: mocks.buildProxyDescription,
+  getLargeDirectToolsAdvisory: vi.fn(() => undefined),
   getMissingConfiguredDirectToolServers: mocks.getMissingConfiguredDirectToolServers,
   prepareDirectToolArguments: vi.fn((_schema: unknown, args: unknown) => args),
   resolveDirectTools: mocks.resolveDirectTools,

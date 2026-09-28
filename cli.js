@@ -38,12 +38,12 @@ function getAgentDir() {
 }
 
 const AGENT_DIR = getAgentDir();
-const PI_CONFIG_PATH = path.join(AGENT_DIR, "mcp.json");
+const PI_CONFIG_PATH = path.join(AGENT_DIR, "mcp-adapter.json");
 const GENERIC_GLOBAL_CONFIG_PATH = path.join(HOME, ".config", "mcp", "mcp.json");
 const AGENTS_GLOBAL_CONFIG_PATH = path.join(HOME, ".agents", "mcp.json");
 const AGENTS_NESTED_GLOBAL_CONFIG_PATH = path.join(HOME, ".agents", "mcp", "mcp.json");
 const PROJECT_CONFIG_PATH = path.resolve(process.cwd(), ".mcp.json");
-const PROJECT_PI_CONFIG_PATH = path.resolve(process.cwd(), getConfigDirName(), "mcp.json");
+const PROJECT_PI_CONFIG_PATH = path.resolve(process.cwd(), getConfigDirName(), "mcp-adapter.json");
 
 const IMPORT_PATHS = {
   cursor: [path.join(HOME, ".cursor", "mcp.json")],
@@ -79,36 +79,38 @@ function printHelp(log = console.log) {
   log("  pi-mcp-adapter token status <server>  Report whether a stored token matches the configured URL");
   log("  pi-mcp-adapter token remove <server>  Remove the stored token");
   log("");
-  log("TypeSafe API key storage:");
-  log("  pi-mcp-adapter key set typesafe     Store a key read from stdin (masked prompt or pipe; never argv)");
-  log("  pi-mcp-adapter key status typesafe  Report the effective credential source without revealing it");
-  log("  pi-mcp-adapter key remove typesafe  Remove the stored key");
+  log("Jev API key storage (SYSTEMONE_ENDPOINT selects the provider endpoint):");
+  log("  pi-mcp-adapter key set systemone     Store a key read from stdin (masked prompt or pipe; never argv)");
+  log("  pi-mcp-adapter key status systemone  Report the effective credential source without revealing it");
+  log("  pi-mcp-adapter key remove systemone  Remove the stored key");
 }
 
 function readJsonFile(filePath) {
-  return JSON.parse(stripJsonComments(fs.readFileSync(filePath, "utf-8"), { trailingCommas: true }));
+  const raw = fs.readFileSync(filePath, "utf-8");
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  return text.trim() === "" ? {} : JSON.parse(stripJsonComments(text, { trailingCommas: true }));
 }
 
 function loadPiConfig() {
-  if (!fs.existsSync(PI_CONFIG_PATH)) {
+  if (!fs.lstatSync(PI_CONFIG_PATH, { throwIfNoEntry: false })) {
     return { mcpServers: {} };
   }
 
   const raw = readJsonFile(PI_CONFIG_PATH);
-  const mcpServers = raw.mcpServers ?? raw["mcp-servers"] ?? {};
-  if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) {
-    throw new Error(`Invalid MCP config at ${PI_CONFIG_PATH}: expected \"mcpServers\" to be an object`);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`Invalid MCP config at ${PI_CONFIG_PATH}: top-level value must be an object`);
   }
-
-  const normalized = { ...raw };
-  delete normalized["mcp-servers"];
-
-  const imports = Array.isArray(raw.imports) ? raw.imports.filter((value) => typeof value === "string") : undefined;
-  return {
-    ...normalized,
-    mcpServers,
-    imports,
-  };
+  for (const key of ["mcpServers", "mcp-servers", "settings"]) {
+    const value = raw[key];
+    if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) {
+      throw new Error(`Invalid MCP config at ${PI_CONFIG_PATH}: ${key} must be an object`);
+    }
+  }
+  if (raw.imports !== undefined && (!Array.isArray(raw.imports) || raw.imports.some((value) => typeof value !== "string"))) {
+    throw new Error(`Invalid MCP config at ${PI_CONFIG_PATH}: imports must be an array of strings`);
+  }
+  const { "mcp-servers": legacyServers, ...normalized } = raw;
+  return { ...normalized, mcpServers: raw.mcpServers ?? legacyServers ?? {} };
 }
 
 function findAvailableImports() {
@@ -131,9 +133,9 @@ function printDiscovery(log, imports) {
     ["User-global standard MCP", GENERIC_GLOBAL_CONFIG_PATH],
     ["User-global .agents MCP", AGENTS_GLOBAL_CONFIG_PATH],
     ["User-global .agents nested MCP", AGENTS_NESTED_GLOBAL_CONFIG_PATH],
-    ["Pi global override", PI_CONFIG_PATH],
+    ["MCP adapter global override", PI_CONFIG_PATH],
     ["Project standard MCP", PROJECT_CONFIG_PATH],
-    ["Project Pi override", PROJECT_PI_CONFIG_PATH],
+    ["Project MCP adapter override", PROJECT_PI_CONFIG_PATH],
   ];
 
   for (const [label, filePath] of paths) {
@@ -171,8 +173,8 @@ async function runInit(argv, log = console.log) {
 
   const discoverySettingChanged = discoverHostConfigs && existingConfig.settings?.hostConfigDiscovery !== "on";
   if (importsToAdd.length === 0 && !discoverySettingChanged) {
-    log("\nNo Pi config changes needed.");
-    log("Standard MCP configs are discovered automatically, and host-specific imports are already configured or unavailable.");
+    log("\nNo MCP adapter config changes needed.");
+    log("Standard MCP configs are discovered automatically. Pi's mcp.json files are reserved for built-in MCP; adapter settings belong in mcp-adapter.json.");
     return 0;
   }
 
@@ -184,10 +186,10 @@ async function runInit(argv, log = console.log) {
   };
 
   if (importsToAdd.length > 0) {
-    log(`\nDetected host configs to import into Pi: ${importsToAdd.join(", ")}`);
+    log(`\nDetected host configs to import into the MCP adapter: ${importsToAdd.join(", ")}`);
   }
   if (discoverySettingChanged) {
-    log("Opting in to host-specific fallback discovery (standard and Pi-owned configs still take precedence).");
+    log("Opting in to host-specific fallback discovery (standard and adapter-owned configs still take precedence).");
   }
 
   if (dryRun) {
@@ -197,7 +199,7 @@ async function runInit(argv, log = console.log) {
 
   writePiConfig(nextConfig);
   log(`Updated ${PI_CONFIG_PATH}`);
-  log("Pi will now keep reading standard MCP configs automatically, while these imports cover host-specific config formats.");
+  log("The adapter reads standard MCP configs automatically and stores adapter-specific imports in mcp-adapter.json; Pi's mcp.json is never read by the adapter.");
   if (discoverySettingChanged) {
     log("Host config discovery is explicit and does not write to or execute commands from external host files.");
   }
@@ -359,8 +361,9 @@ async function runToken(argv, log, error, stdin) {
 
 async function runKey(argv, log, error, stdin) {
   const [action, provider, ...extra] = argv;
-  if (!["set", "status", "remove"].includes(action) || provider !== "typesafe") {
-    error("Usage: pi-mcp-adapter key <set|status|remove> typesafe");
+  // `typesafe` is the pre-endpoint provider name, kept for existing scripts.
+  if (!["set", "status", "remove"].includes(action) || (provider !== "systemone" && provider !== "typesafe")) {
+    error("Usage: pi-mcp-adapter key <set|status|remove> systemone");
     error("`key set` reads the API key from stdin only. Never pass the key as an argument.");
     return 1;
   }
@@ -371,31 +374,41 @@ async function runKey(argv, log, error, stdin) {
   let store;
   try { store = await import("./dist/jev-key-store.js"); }
   catch (err) {
-    error("Unable to load TypeSafe key command module.");
+    error("Unable to load Jev key command module.");
     error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
-
-  if (action === "set") {
-    const apiKey = await readSecretFromStdin(stdin, "Enter TypeSafe API key (input hidden): ");
-    if (!apiKey) { error("No API key provided on stdin."); return 1; }
-    try { store.saveJevApiKey(apiKey); }
-    catch (err) { error(err instanceof Error ? err.message : "TypeSafe API key could not be stored."); return 1; }
-    log("TypeSafe API key stored in the OS secure credential store.");
-    if (Object.hasOwn(process.env, "TYPESAFE_API_KEY")) log("Note: TYPESAFE_API_KEY is present and overrides the stored key.");
-    return 0;
+  const resolution = store.resolveJevEndpoint();
+  if (resolution.status === "unavailable") {
+    error("SYSTEMONE_ENDPOINT is set but invalid, so no key can be stored or read for it.");
+    error(resolution.message);
+    return 1;
   }
+  const endpoint = resolution.endpoint;
+
   if (action === "status") {
-    const status = store.resolveJevCredential();
-    if (status.status === "present") { log(`source=${status.source}`); return 0; }
+    const status = store.resolveJevCredential(process.env, endpoint);
+    if (status.status === "present") { log(`source=${status.source}`); log(`endpoint=${endpoint.href}`); return 0; }
     if (status.status === "unavailable") { error(`unavailable: ${status.message}`); return 1; }
     log("missing");
     return 1;
   }
-  try { store.removeJevApiKey(); }
-  catch (err) { error(err instanceof Error ? err.message : "TypeSafe API key could not be removed."); return 1; }
-  log("TypeSafe API key removed from the OS secure credential store.");
-  if (Object.hasOwn(process.env, "TYPESAFE_API_KEY")) log("TYPESAFE_API_KEY is still present and overrides the stored key.");
+  if (action === "set") {
+    const apiKey = await readSecretFromStdin(stdin, `Enter Jev API key for ${endpoint.href} (input hidden): `);
+    if (!apiKey) { error("No API key provided on stdin."); return 1; }
+    try { store.saveJevApiKey(apiKey, endpoint); }
+    catch (err) { error(err instanceof Error ? err.message : "Jev API key could not be stored."); return 1; }
+    log("Jev API key stored in the OS secure credential store.");
+    log(`endpoint=${endpoint.href}`);
+  } else {
+    try { store.removeJevApiKey(endpoint); }
+    catch (err) { error(err instanceof Error ? err.message : "Jev API key could not be removed."); return 1; }
+    log("Jev API key removed from the OS secure credential store.");
+  }
+  if (Object.hasOwn(process.env, "SYSTEMONE_API_KEY")) log("Note: SYSTEMONE_API_KEY is present and overrides the stored key.");
+  else if (Object.hasOwn(process.env, "TYPESAFE_API_KEY")) log(endpoint.href === store.JEV_DEFAULT_ENDPOINT
+    ? "Note: TYPESAFE_API_KEY is present and overrides the stored key."
+    : `Note: TYPESAFE_API_KEY is ignored for ${endpoint.href}; it is a TypeSafe credential and is never sent there.`);
   return 0;
 }
 

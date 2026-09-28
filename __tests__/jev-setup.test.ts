@@ -60,7 +60,7 @@ describe("Jev setup", () => {
 
     expect(await setupJevSemanticSearch(state(), { hasUI: true, ui } as any)).toBe(false);
     expect(ui.select).not.toHaveBeenCalled();
-    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("pi-mcp-adapter key set typesafe"), "error");
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("pi-mcp-adapter key set systemone"), "error");
   });
 
   it("does not overwrite malformed configuration", () => {
@@ -68,14 +68,14 @@ describe("Jev setup", () => {
     const path = join(root, "mcp.json");
     writeFileSync(path, "{invalid\n");
 
-    expect(() => writeJevSemanticSearchConfig(path, root, ["demo"])).toThrow("Failed to update Jev settings");
+    expect(() => writeJevSemanticSearchConfig(path, root, ["demo"])).toThrow(`Failed to read MCP config at ${path}`);
     expect(readFileSync(path, "utf8")).toBe("{invalid\n");
   });
 
   it("writes project-scoped policy by default and validates server names", () => {
     const cwd = mkdtempSync(join(tmpdir(), "mcp-jev-setup-project-"));
     const result = writeJevSemanticSearchConfig(undefined, cwd, ["demo"]);
-    expect(result.path).toBe(join(cwd, ".pi", "mcp.json"));
+    expect(result.path).toBe(join(cwd, ".pi", "mcp-adapter.json"));
     expect(JSON.parse(readFileSync(result.path, "utf8"))).toMatchObject({
       settings: { jev: { semanticSearch: true, allowedServers: ["demo"] } },
     });

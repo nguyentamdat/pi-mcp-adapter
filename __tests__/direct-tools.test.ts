@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { DIRECT_TOOLS_ADVISORY_THRESHOLD, buildProxyDescription, resolveDirectTools } from "../direct-tools.ts";
+import { DIRECT_TOOLS_ADVISORY_THRESHOLD, buildProxyDescription, getLargeDirectToolsAdvisory, resolveDirectTools } from "../direct-tools.ts";
 import {
   computeServerHash,
   getMissingConfiguredDirectToolServers,
@@ -13,6 +13,7 @@ import { formatToolName } from "../types.ts";
 import type { McpConfig } from "../types.ts";
 import { reconstructToolMetadata } from "../metadata-cache.ts";
 import { updateServerMetadata } from "../init.ts";
+import { markBuiltInAgentPlugin } from "../agent-plugin-provenance.ts";
 
 const originalHashEnv = {
   MCP_HASH_CWD: process.env.MCP_HASH_CWD,
@@ -134,7 +135,7 @@ describe("buildProxyDescription", () => {
     const description = buildProxyDescription(config);
 
     expect(description).toContain("Servers: demo\n");
-    expect(description).toContain("Disabled servers (enable with /mcp enable <server> and /reload): parked");
+    expect(description).toContain("Disabled servers (enable with /mcp-adapter enable <server> and /reload): parked");
   });
 
   it("omits the Servers line entirely when no servers are configured", () => {
@@ -154,6 +155,28 @@ describe("metadata cache hashing", () => {
     const modern = computeServerHash({ command: "node", protocolVersion: "2026-07-28" });
 
     expect(new Set([legacy, automatic, modern]).size).toBe(3);
+  });
+
+  it("invalidates cached stdio tools when inheritEnv or literalEnv changes", () => {
+    const definition = { command: "node", env: { MODE: "${MODE}" } };
+    const environment = { MODE: "expanded" };
+    const entry = { configHash: computeServerHash(definition, environment), cachedAt: Date.now(), tools: [], resources: [] };
+    const literal = { ...definition, literalEnv: true };
+    const plugin = markBuiltInAgentPlugin({ ...definition }, ["env"]);
+
+    expect(isServerCacheValid(entry, { ...definition, inheritEnv: true, literalEnv: false }, undefined, environment)).toBe(true);
+    expect(isServerCacheValid(entry, { ...definition, inheritEnv: false }, undefined, environment)).toBe(false);
+    expect(isServerCacheValid(entry, literal, undefined, environment)).toBe(false);
+    expect(computeServerHash(literal, { MODE: "first" })).toBe(computeServerHash(literal, { MODE: "second" }));
+    expect(computeServerHash(plugin, { MODE: "first" })).toBe(computeServerHash(plugin, { MODE: "second" }));
+  });
+
+  it("keeps caches from before stdio env flags were hashed valid for remote servers only", () => {
+    const cached = (configHash: string) => ({ configHash, cachedAt: Date.now(), tools: [], resources: [] });
+
+    expect(isServerCacheValid(cached("211503c5c035663196f90839c226a3f67c2e01ff7719c2ed818860072c96d8ec"), { url: "https://example.test/mcp" })).toBe(true);
+    expect(isServerCacheValid(cached("c5e102840a79aec3fd3d129037f379198fb13cdcfa5ffbc96a5f314002e7d188"), { socket: "/tmp/mcp.sock" })).toBe(true);
+    expect(isServerCacheValid(cached("c7cd5329512fb9b1605e786af247579d1ff2e23f694488e403295ea142b4e9ce"), { command: "node" })).toBe(false);
   });
 
   it("hashes interpolated URLs", () => {
@@ -855,7 +878,7 @@ describe("excludeTools filtering", () => {
     expect(specs.map((spec) => spec.prefixedName)).toEqual(["github_search"]);
   });
 
-  it("warns by default without capping when resolved direct tools exceed the README threshold", () => {
+  it("resolves tools deterministically and reports the advisory at the eager-tool threshold", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const tools = Array.from({ length: DIRECT_TOOLS_ADVISORY_THRESHOLD }, (_, index) => ({
       name: `tool_${index}`,
@@ -885,8 +908,11 @@ describe("excludeTools filtering", () => {
     const specs = resolveDirectTools(config, cache, "server");
 
     expect(specs).toHaveLength(DIRECT_TOOLS_ADVISORY_THRESHOLD);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("75+ direct tools"));
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("settings.warnOnLargeDirectTools to false"));
+    expect(warn).not.toHaveBeenCalled();
+    expect(getLargeDirectToolsAdvisory(config, specs)).toEqual(expect.stringContaining("75+ direct tools"));
+    expect(getLargeDirectToolsAdvisory(config, specs)).toEqual(expect.stringContaining("settings.warnOnLargeDirectTools to false"));
+    expect(getLargeDirectToolsAdvisory(config, specs.slice(0, -1))).toBeUndefined();
+    expect(getLargeDirectToolsAdvisory(config, specs.map((spec) => ({ ...spec, lazy: true })))).toBeUndefined();
   });
 
   it("suppresses the large direct-tools advisory when configured", () => {
@@ -921,6 +947,7 @@ describe("excludeTools filtering", () => {
 
     expect(specs).toHaveLength(DIRECT_TOOLS_ADVISORY_THRESHOLD);
     expect(warn).not.toHaveBeenCalled();
+    expect(getLargeDirectToolsAdvisory(config, specs)).toBeUndefined();
   });
 
   it("filters included tools during direct tool registration from cache", () => {

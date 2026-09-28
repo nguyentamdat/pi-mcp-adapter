@@ -10,6 +10,13 @@ import { resourceNameToToolName } from "./resource-tools.ts";
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
 export const DIRECT_TOOLS_ADVISORY_THRESHOLD = 75;
 
+export function getLargeDirectToolsAdvisory(config: McpConfig, specs: readonly DirectToolSpec[]): string | undefined {
+  if (config.settings?.warnOnLargeDirectTools === false) return undefined;
+  const eagerCount = specs.filter((spec) => !spec.lazy).length;
+  if (eagerCount < DIRECT_TOOLS_ADVISORY_THRESHOLD) return undefined;
+  return `MCP: ${eagerCount} direct tools resolved. Each direct tool adds prompt context; README guidance recommends targeted sets of 5-20 tools and using the proxy or an explicit string[] when 75+ direct tools would be registered. Set settings.warnOnLargeDirectTools to false to hide this advisory.`;
+}
+
 /**
  * Recover one model-emitted JSON layer for schema-declared object and array
  * properties, then validate the complete input against the same schema.
@@ -182,12 +189,6 @@ export function resolveDirectTools(
     ? uniqueSpecs
     : uniqueSpecs.filter((spec) => !unavailableServers.has(spec.serverName));
 
-  // Lazy specs cost nothing at turn start, so they do not count toward the advisory.
-  const eagerCount = emittedSpecs.filter((spec) => !spec.lazy).length;
-  if (config.settings?.warnOnLargeDirectTools !== false && eagerCount >= DIRECT_TOOLS_ADVISORY_THRESHOLD) {
-    console.warn(`MCP: ${eagerCount} direct tools resolved. Each direct tool adds prompt context; README guidance recommends targeted sets of 5-20 tools and using the proxy or an explicit string[] when 75+ direct tools would be registered. Set settings.warnOnLargeDirectTools to false to hide this advisory.`);
-  }
-
   return emittedSpecs;
 }
 
@@ -215,14 +216,14 @@ export function buildProxyDescription(config: McpConfig): string {
     return selected === "search";
   });
   if (searchModeServers.length > 0) {
-    desc += `\nSearch-mode servers (${searchModeServers.join(", ")}): their tools become real, schema-backed tools the first time mcp({ search }) matches them — after that, call them directly by name.\n`;
+    desc += `\nSearch-mode servers (${searchModeServers.join(", ")}): their tools become real, schema-backed tools the first time mcp({ search }) matches them or mcp({ tool }) calls them — after that, call them directly by name.\n`;
   }
 
   const disabledServers = Object.entries(config.mcpServers)
     .filter(([, definition]) => isServerDisabled(definition))
     .map(([serverName]) => serverName);
   if (disabledServers.length > 0) {
-    desc += `\nDisabled servers (enable with /mcp enable <server> and /reload): ${disabledServers.join(", ")}\n`;
+    desc += `\nDisabled servers (enable with /mcp-adapter enable <server> and /reload): ${disabledServers.join(", ")}\n`;
   }
 
   desc += `\nUsage:\n`;

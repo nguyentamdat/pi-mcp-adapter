@@ -91,7 +91,7 @@ describe("semantic search", () => {
     const state = stateWithTools();
     state.config.settings!.jev = { semanticSearch: false, allowedServers: ["demo"] };
     const evaluator = choiceEvaluator("none");
-    vi.stubEnv("TYPESAFE_API_KEY", "configured-key");
+    vi.stubEnv("SYSTEMONE_API_KEY", "configured-key");
     const result = await gatewaySemantic(state, "anything", evaluator);
     expect(result.details).toMatchObject({ error: "disabled" });
     expect(evaluator).not.toHaveBeenCalled();
@@ -101,7 +101,7 @@ describe("semantic search", () => {
     const state = stateWithTools();
     delete state.config.settings;
     state.config.mcpServers.other!.disabled = true;
-    vi.stubEnv("TYPESAFE_API_KEY", "configured-key");
+    vi.stubEnv("SYSTEMONE_API_KEY", "configured-key");
     const inspect = vi.fn(async (_state: McpExtensionState, input: JevEvaluateInput) => {
       expect(input.sources).toEqual(["demo"]);
       return choiceEvaluator("demo_tool_0")(_state, input, { purpose: "semantic-search" });
@@ -188,12 +188,34 @@ describe("semantic search", () => {
       const result = await gatewaySemantic(state, "invoices", evaluator);
       expect(result.details).toMatchObject({ backend: { requested: "semantic", used: "lexical", degraded: true, reason: code } });
     }
-    for (const code of ["credential_missing", "authentication_failed", "data_policy_denied", "invalid_response"] as const) {
+    for (const code of ["credential_missing", "credential_unavailable", "endpoint_unavailable", "authentication_failed", "payment_required", "data_policy_denied", "invalid_response"] as const) {
       const evaluator: SemanticSearchEvaluator = async () => ({ ok: false, error: { code, message: "hard failure" } });
       const result = await gatewaySemantic(state, "invoices", evaluator);
       expect(result.details).toMatchObject({ error: code, message: "hard failure" });
       expect(result.details).not.toHaveProperty("backend");
     }
+  });
+
+  it("keeps the semantic server allowlist when falling back to lexical search", async () => {
+    const state = stateWithTools();
+    state.config.settings!.jev = { semanticSearch: true, allowedServers: ["demo", "other"] };
+    state.config.mcpServers.excluded = { command: "excluded" };
+    state.toolMetadata.get("demo")![0]!.description = "Weather forecast";
+    state.toolMetadata.set("excluded", [{ name: "excluded_weather", originalName: "weather", description: "Weather forecast" }]);
+    const evaluator: SemanticSearchEvaluator = vi.fn(async (_state, input) => {
+      expect(input.sources).toEqual(["demo", "other"]);
+      return { ok: false, error: { code: "timeout", message: "down" } };
+    });
+
+    const gateway = await gatewaySemantic(state, "weather", evaluator);
+    expect(gateway.details.backend).toMatchObject({ used: "lexical", degraded: true });
+    expect(gateway.details.matches.map((match: { server: string }) => match.server).sort()).toEqual(["demo", "other"]);
+
+    const script = await runMcpScript(state, 'emit(await tools.search({ query: "weather", searchMode: "semantic" }))',
+      2_000, undefined, undefined, undefined, evaluator);
+    const payload = JSON.parse(script.content[0]!.text);
+    expect(payload.backend).toMatchObject({ used: "lexical", degraded: true });
+    expect(payload.items.map((item: { server: string }) => item.server).sort()).toEqual(["demo", "other"]);
   });
 
   it("preserves pagination, schemas, and approval markers without executing", async () => {
