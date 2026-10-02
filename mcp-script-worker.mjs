@@ -1,16 +1,18 @@
 import { parentPort, workerData } from "node:worker_threads";
-import { JSException, MAX_STACK_SIZE, QuickJS } from "quickjs-wasi";
 
 const MEMORY_LIMIT_BYTES = 64 * 1024 * 1024;
 const ERROR_MAX_BYTES = 64 * 1024;
 const ERROR_TRUNCATION_MARKER = "\n...[mcpScript error truncated]";
+
+// Set once main() imports quickjs-wasi from the host-resolved file URL.
+let JSException;
 
 function post(message) {
   parentPort?.postMessage(message);
 }
 
 function errorText(error) {
-  if (error instanceof JSException) {
+  if (JSException && error instanceof JSException) {
     const head = error.message ? `${error.name}: ${error.message}` : error.name;
     return error.stack ? `${head}\n${error.stack}` : head;
   }
@@ -127,11 +129,15 @@ const PRELUDE_SOURCE = `(function (bridge) {
     get(_target, property) {
       if (property === "search") return (input) => request("search", { input });
       if (property === "describe") return (input) => request("describe", { input });
-      if (property === "call") return (path, args) => {
+      if (property === "call") return (path, args, options) => {
         if (typeof path !== "string" || path.trim() === "") {
           return Promise.resolve({ ok: false, error: { code: "invalid_tool_path", message: "tools.call(path, args) requires a non-empty tool path." } });
         }
-        return request("call", { path, args });
+        const server = options?.server;
+        if (server !== undefined && (typeof server !== "string" || server.trim() === "")) {
+          return Promise.resolve({ ok: false, error: { code: "invalid_tool_server", message: "tools.call(path, args, { server }) requires a non-empty server name." } });
+        }
+        return request("call", server === undefined ? { path, args } : { path, args, server });
       };
       if (typeof property !== "string" || reserved.has(property)) return undefined;
       return (args) => request("call", { path: property, args });
@@ -172,6 +178,11 @@ const PRELUDE_SOURCE = `(function (bridge) {
 })`;
 
 async function main() {
+  // Bun-compiled executables cannot resolve bare package names from this
+  // worker file, so import quickjs-wasi from the URL the host resolved.
+  const quickjs = await import(workerData.quickjsUrl);
+  JSException = quickjs.JSException;
+  const { MAX_STACK_SIZE, QuickJS } = quickjs;
   const interrupt = new Int32Array(workerData.interrupt);
   let outputBytes = 0;
   let outputExceeded = false;

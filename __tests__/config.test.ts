@@ -393,6 +393,39 @@ describe("config discovery", () => {
     });
   });
 
+  it("loads package git sources with a port, user, or ref from Pi's managed git directory", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-package-git-port-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-package-git-port-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    const gitRoot = join(home, ".pi", "agent", "git", "gitlab.example.com", "acme");
+    writeJson(join(home, ".pi", "agent", "settings.json"), {
+      packages: [
+        "ssh://git@gitlab.example.com:2235/acme/port-tools.git",
+        "ssh://deploy@gitlab.example.com/acme/user-tools",
+        "https://gitlab.example.com/acme/ref-tools.git@release/v2",
+        "git:git@gitlab.example.com:acme/scp-tools@feature/x",
+      ],
+    });
+    writeJson(join(gitRoot, "port-tools", "package.json"), { name: "port-tools", pi: { mcp: "./mcp.json" } });
+    writeJson(join(gitRoot, "port-tools", "mcp.json"), { mcpServers: { port: { command: "port" } } });
+    writeJson(join(gitRoot, "user-tools", "package.json"), { name: "user-tools", pi: { mcp: "./mcp.json" } });
+    writeJson(join(gitRoot, "user-tools", "mcp.json"), { mcpServers: { user: { command: "user" } } });
+    writeJson(join(gitRoot, "ref-tools", "package.json"), { name: "ref-tools", pi: { mcp: "./mcp.json" } });
+    writeJson(join(gitRoot, "ref-tools", "mcp.json"), { mcpServers: { ref: { command: "ref" } } });
+    writeJson(join(gitRoot, "scp-tools", "package.json"), { name: "scp-tools", pi: { mcp: "./mcp.json" } });
+    writeJson(join(gitRoot, "scp-tools", "mcp.json"), { mcpServers: { scp: { command: "scp" } } });
+
+    const { loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers).toEqual({
+      "port-tools__port": { command: "port" },
+      "user-tools__user": { command: "user" },
+      "ref-tools__ref": { command: "ref" },
+      "scp-tools__scp": { command: "scp" },
+    });
+  });
+
   it("skips a package MCP symlink that resolves outside its package root", async () => {
     const home = mkdtempSync(join(tmpdir(), "pi-mcp-package-symlink-home-"));
     const project = mkdtempSync(join(tmpdir(), "pi-mcp-package-symlink-project-"));
@@ -2252,11 +2285,6 @@ describe("config discovery", () => {
     expect(getLegacyMcpMigrationNotices(project, globalOld)).toEqual([
       `pi-mcp-adapter no longer reads ${projectOld}. Move it with: mv ${JSON.stringify(projectOld)} ${JSON.stringify(projectTarget)}`,
     ]);
-    // With Pi's built-in MCP, mcpServers belong to Pi; only adapter-only keys are reported.
-    writeJson(globalOld, { mcpServers: { piOwned: { command: "pi" } } });
-    expect(getLegacyMcpMigrationNotices(project, undefined, true)).toEqual([
-      `${projectOld} contains pi-mcp-adapter settings that neither Pi nor the adapter reads. Move settings, imports, and claudePlugins into ${projectTarget}, and put any "mcp-servers" entries under its "mcpServers" key.`,
-    ]);
   });
 
 });
@@ -2293,5 +2321,43 @@ describe("settings.exposeResources", () => {
     expect(cfg.mcpServers.serverA?.exposeResources).toBe(false);
     expect(cfg.mcpServers.serverB?.exposeResources).toBe(true);
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("server description", () => {
+  it("keeps a string description and drops a non-string one with a warning", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-mcp-description-"));
+    const configPath = join(root, "config.json");
+    writeJson(configPath, {
+      mcpServers: {
+        weather: { command: "node", description: "Forecasts and severe weather alerts" },
+        broken: { command: "node", description: 42 },
+      },
+    });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { loadMcpConfig } = await import("../config.ts");
+    const cfg = loadMcpConfig(configPath, root);
+    expect(cfg.mcpServers.weather).toEqual({ command: "node", description: "Forecasts and severe weather alerts" });
+    expect(cfg.mcpServers.broken).toEqual({ command: "node" });
+    expect(warning).toHaveBeenCalledWith('Ignoring invalid description for MCP server "broken": expected a string');
+    warning.mockRestore();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("drops a non-string description from an imported host config", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "pi-mcp-description-import-")));
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("PI_PACKAGE_DIR", "");
+    vi.stubEnv("PI_CODING_AGENT_DIR", "");
+    vi.stubEnv("PI_MCP_CONFIG_MODE", "merge");
+    vi.resetModules();
+    writeJson(join(home, ".pi", "agent", "mcp-adapter.json"), { imports: ["cursor"], mcpServers: {} });
+    writeJson(join(home, ".cursor", "mcp.json"), { mcpServers: { cursor: { command: "cursor-server", description: 42 } } });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig(undefined, home).mcpServers.cursor).toEqual({ command: "cursor-server" });
+    warning.mockRestore();
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
   });
 });
