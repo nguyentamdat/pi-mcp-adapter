@@ -59,6 +59,17 @@ export const KNOWN_SERVER_PRESETS: readonly KnownServerPreset[] = [
     },
   },
   {
+    id: "tavily-search",
+    name: "Tavily Search",
+    summary: "Search the web and extract page content without an API key.",
+    entry: {
+      url: "https://mcp.tavily.com/mcp/",
+      headers: { "X-Tavily-Access-Mode": "keyless" },
+      protocolVersion: "auto",
+      directTools: ["tavily_search", "tavily_extract"],
+    },
+  },
+  {
     id: "notion",
     name: "Notion",
     summary: "Search and work with your Notion workspace.",

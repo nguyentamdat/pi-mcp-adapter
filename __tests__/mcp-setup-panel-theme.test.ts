@@ -64,6 +64,24 @@ function createCallbacks(): SetupPanelCallbacks {
 }
 
 describe("mcp setup panel theme and component rendering", () => {
+  it("shows Tavily Search directly below Parallel Search in the add-server list", () => {
+    const panel = createMcpSetupPanel(
+      createDiscovery(),
+      createCallbacks(),
+      { mode: "setup", onboardingState: { version: 1, sharedConfigHintShown: false, setupCompleted: false } },
+      { requestRender: () => {}, terminal: { rows: 60 } },
+      () => {},
+    );
+
+    const lines = panel.render(200).map(stripAnsi);
+    const parallelIndex = lines.findIndex((line) => line.includes("Parallel Search"));
+    expect(parallelIndex).toBeGreaterThanOrEqual(0);
+    expect(lines[parallelIndex + 1]).toContain("Tavily Search");
+    moveCursorTo(panel, "Tavily Search");
+    expect(panel.render(200).map(stripAnsi).join("\n")).toContain("extract page content without an API key.");
+    panel.dispose();
+  });
+
   it("shows preview errors without breaking setup or import rendering", () => {
     const discovery = createDiscovery();
     discovery.imports = [{ kind: "cursor", path: "/tmp/cursor-mcp.json", serverCount: 1 }];

@@ -2235,6 +2235,27 @@ describe("config discovery", () => {
     warning.mockRestore();
   });
 
+  it("places the keyless Tavily preset directly after Parallel Search and preserves its header", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "pi-mcp-tavily-preset-")), "mcp.json");
+    const { KNOWN_SERVER_PRESETS, previewSharedServerEntry, writeSharedServerEntry } = await import("../config.ts");
+    const parallelIndex = KNOWN_SERVER_PRESETS.findIndex(({ id }) => id === "parallel-search");
+    const preset = KNOWN_SERVER_PRESETS[parallelIndex + 1]!;
+
+    expect(preset.id).toBe("tavily-search");
+    expect(preset.entry).toEqual({
+      url: "https://mcp.tavily.com/mcp/",
+      headers: { "X-Tavily-Access-Mode": "keyless" },
+      protocolVersion: "auto",
+      directTools: ["tavily_search", "tavily_extract"],
+    });
+    expect(previewSharedServerEntry(path, preset.id, preset.entry).diffText).toContain('"X-Tavily-Access-Mode": "keyless"');
+    expect(existsSync(path)).toBe(false);
+    writeSharedServerEntry(path, preset.id, preset.entry);
+    expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+      mcpServers: { "tavily-search": preset.entry },
+    });
+  });
+
   it("uses automatic protocol negotiation for remote known-server presets", async () => {
     const { KNOWN_SERVER_PRESETS } = await import("../config.ts");
     for (const preset of KNOWN_SERVER_PRESETS.filter(({ entry }) => entry.url)) {
