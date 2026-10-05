@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Support Pi 1.0.0 by accepting its `@earendil-works/pi-ai` peer version and validating against Pi 1.0.0 host packages. Thanks to [@lucascaro](https://github.com/lucascaro) for [PR #801](https://github.com/nicobailon/pi-mcp-adapter/pull/801).
 
+### Fixed
+
+- `pi -p` no longer hangs after replying when a kept-alive HTTP server uses a `bearerToken` command or `auth.provider`: closing the server now ends its open event stream. Thanks to [@nguyentamdat](https://github.com/nguyentamdat) for [PR #802](https://github.com/nicobailon/pi-mcp-adapter/pull/802).
+
 ## [5.0.0] - 2026-10-01
 
 ### Highlights
