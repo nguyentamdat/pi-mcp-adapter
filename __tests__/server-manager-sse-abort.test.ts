@@ -49,17 +49,21 @@ it("close() aborts the open SSE GET through the bearerTokenCommand fetch wrapper
   if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
 
   const manager = new McpServerManager();
-  await manager.connect("sse", { url: `http://127.0.0.1:${address.port}/mcp`,
-    auth: "bearer",
-    bearerToken: `!node -e "process.stdout.write('t')"`,
-  });
-  expect(await waitFor(() => sseOpen, 2000)).toBe(true);
+  try {
+    await manager.connect("sse", { url: `http://127.0.0.1:${address.port}/mcp`,
+      auth: "bearer",
+      bearerToken: `!node -e "process.stdout.write('t')"`,
+    });
+    expect(await waitFor(() => sseOpen, 2000)).toBe(true);
 
-  // Wrapper Request objects are only weakly linked to the caller's signal.
-  gc();
-  await new Promise(resolve => setTimeout(resolve, 50));
-  gc();
+    // Wrapper Request objects are only weakly linked to the caller's signal.
+    gc();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    gc();
 
-  await manager.close("sse");
-  expect(await waitFor(() => sseClosed, 2000)).toBe(true);
+    await manager.close("sse");
+    expect(await waitFor(() => sseClosed, 2000)).toBe(true);
+  } finally {
+    await manager.close("sse").catch(() => {});
+  }
 });
