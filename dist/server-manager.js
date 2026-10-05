@@ -131,6 +131,30 @@ export function isTransientHttpConnectError(error) {
     }
     return false;
 }
+/**
+ * Forward as url+init with the caller's own signal, never as a Request object: undici links a
+ * Request's signal to its source weakly, so once the wrapper Request is garbage-collected an
+ * abort no longer reaches the fetch and long-lived SSE GETs keep their socket (pi never exits).
+ */
+function forwardInit(input, init, request, overrides = {}) {
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : request.signal);
+    return [request.url, {
+            method: request.method,
+            headers: request.headers,
+            body: request.body,
+            cache: request.cache,
+            credentials: request.credentials,
+            integrity: request.integrity,
+            keepalive: request.keepalive,
+            mode: request.mode,
+            redirect: request.redirect,
+            referrer: request.referrer,
+            referrerPolicy: request.referrerPolicy,
+            signal,
+            ...(request.body ? { duplex: "half" } : {}),
+            ...overrides,
+        }];
+}
 /** Wrap a FetchLike so each request re-resolves the bearer token via the resolver. */
 function createBearerCommandFetch(resolver, delegate) {
     const innerFetch = delegate
@@ -147,8 +171,7 @@ function createBearerCommandFetch(resolver, delegate) {
             // The Headers error quotes the value, so it must not surface.
             throw new TypeError("bearerTokenCommand returned a token that is not a valid header value");
         }
-        // Composed runtime fetches accept Request despite the SDK's narrower type.
-        return innerFetch(new Request(request, { headers }));
+        return innerFetch(...forwardInit(input, init, request, { headers }));
     };
 }
 /**
@@ -163,7 +186,7 @@ function createProviderTokenFetch(serverUrl, provider, providerToken, delegate) 
     return async (input, init) => {
         const request = new Request(input, init);
         if (new URL(request.url).origin !== origin)
-            return innerFetch(request);
+            return innerFetch(...forwardInit(input, init, request));
         const token = await providerToken(provider);
         // Without a token the request is not sent; the 401 marks the server as needing sign-in.
         if (!token)
@@ -176,7 +199,7 @@ function createProviderTokenFetch(serverUrl, provider, providerToken, delegate) 
             // The Headers error quotes the value, so it must not surface.
             throw new TypeError(`Pi provider "${provider}" returned a token that is not a valid header value`);
         }
-        return innerFetch(new Request(request, { headers, redirect: "error" }));
+        return innerFetch(...forwardInit(input, init, request, { headers, redirect: "error" }));
     };
 }
 export class McpServerManager {
