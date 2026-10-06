@@ -7,13 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-10-05
+
+### Highlights
+
+- The adapter works with Pi 1.0.0.
+- `/mcp-adapter setup` can add Tavily Search for web search and page extraction, with no account or API key.
+- You can keep a server's MCP App UIs from opening with `"openUi": false` and still use its tools.
+- Other Pi extensions can build on MCP features beyond tool calls, such as the draft MCP Events extension, using the servers and sign-ins you already set up.
+- `pi -p` no longer hangs after replying when an HTTP server signs in with a token command or a Pi `/login` provider.
+
 ### Added
 
-- `/mcp-adapter setup` can add Tavily Search, an opt-in preset for web search and page extraction through Tavily's [keyless access](https://docs.tavily.com/documentation/keyless), with no account, API key, or sign-in. Usage is rate-limited. `tavily_search` and `tavily_extract` are direct tools; Tavily's other tools need an API key and stay behind the proxy. Thanks to [@lakshyaag-tavily](https://github.com/lakshyaag-tavily) for [PR #800](https://github.com/nicobailon/pi-mcp-adapter/pull/800).
+- `/mcp-adapter setup` can add Tavily Search for web search and page extraction. It uses Tavily's [keyless access](https://docs.tavily.com/documentation/keyless), so there is no account, API key, or sign-in; usage is rate-limited. `tavily_search` and `tavily_extract` are direct tools. Tavily's other tools need an API key and stay behind the proxy. Thanks to [@lakshyaag-tavily](https://github.com/lakshyaag-tavily) for [PR #800](https://github.com/nicobailon/pi-mcp-adapter/pull/800).
+- Server entries accept `"openUi": false` to stop that server's MCP App UIs from opening. Its tools still run and return their results inline. Thanks to [@tekumara](https://github.com/tekumara) for [#803](https://github.com/nicobailon/pi-mcp-adapter/issues/803).
+- Other Pi extensions can add MCP features beyond tool calls, such as the draft MCP Events extension, with `registerMcpProtocol`. An extension declares the requests, streams, and notifications it uses, and the adapter sends them to your configured servers with the same sign-in, project trust, and server approval as tool calls. Extensions never get the raw connection. Registering starts no servers and adds nothing to the model's context. See [protocol extensions](docs/protocol-extensions.md). Thanks to [@mikekelly](https://github.com/mikekelly) for [PR #807](https://github.com/nicobailon/pi-mcp-adapter/pull/807).
 
 ### Changed
 
-- Support Pi 1.0.0 by accepting its `@earendil-works/pi-ai` peer version and validating against Pi 1.0.0 host packages. Thanks to [@lucascaro](https://github.com/lucascaro) for [PR #801](https://github.com/nicobailon/pi-mcp-adapter/pull/801).
+- Works with Pi 1.0.0. Thanks to [@lucascaro](https://github.com/lucascaro) for [PR #801](https://github.com/nicobailon/pi-mcp-adapter/pull/801).
+
+### Fixed
+
+- `pi -p` no longer hangs after replying when a kept-alive HTTP server uses a `bearerToken` command or `auth.provider`. Closing the server now ends its open event stream. Thanks to [@nguyentamdat](https://github.com/nguyentamdat) for [PR #802](https://github.com/nicobailon/pi-mcp-adapter/pull/802).
+- Apps that import the adapter directly, instead of loading it through Pi, no longer fail with `Cannot find package '@earendil-works/pi-tui'`. npm now installs `@earendil-works/pi-tui` and `typebox` with the adapter, because it uses them at runtime. Installs through Pi are unchanged. Thanks to [@dannote](https://github.com/dannote) for [#805](https://github.com/nicobailon/pi-mcp-adapter/issues/805).
 
 ## [5.0.0] - 2026-10-01
 

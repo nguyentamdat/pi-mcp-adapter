@@ -118,6 +118,14 @@ function appendStderrTail(tail, chunk) {
         ? Buffer.from(combined.subarray(combined.length - MAX_CAPTURED_STDERR_BYTES))
         : combined;
 }
+// Use the SDK's own envelope builder so extension streams match ordinary requests,
+// including capability changes and negotiated protocol versions.
+class AdapterClient extends Client {
+    requestMetadata() {
+        return this._outboundMetaEnvelope();
+    }
+}
+const clientMetadata = new WeakMap();
 const KEEP_ALIVE_REFRESH_TIMEOUT_MS = 5_000;
 const LISTEN_RETRY_DELAY_MS = 5_000;
 const RECENT_RESOURCE_TTL_MS = 10 * 60_000;
@@ -130,6 +138,30 @@ export function isTransientHttpConnectError(error) {
         current = current.cause;
     }
     return false;
+}
+/**
+ * Forward as url+init with the caller's own signal, never as a Request object: undici links a
+ * Request's signal to its source weakly, so once the wrapper Request is garbage-collected an
+ * abort no longer reaches the fetch and long-lived SSE GETs keep their socket (pi never exits).
+ */
+function forwardInit(input, init, request, overrides = {}) {
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : request.signal);
+    return [request.url, {
+            method: request.method,
+            headers: request.headers,
+            body: request.body,
+            cache: request.cache,
+            credentials: request.credentials,
+            integrity: request.integrity,
+            keepalive: request.keepalive,
+            mode: request.mode,
+            redirect: request.redirect,
+            referrer: request.referrer,
+            referrerPolicy: request.referrerPolicy,
+            signal,
+            ...(request.body ? { duplex: "half" } : {}),
+            ...overrides,
+        }];
 }
 /** Wrap a FetchLike so each request re-resolves the bearer token via the resolver. */
 function createBearerCommandFetch(resolver, delegate) {
@@ -147,8 +179,7 @@ function createBearerCommandFetch(resolver, delegate) {
             // The Headers error quotes the value, so it must not surface.
             throw new TypeError("bearerTokenCommand returned a token that is not a valid header value");
         }
-        // Composed runtime fetches accept Request despite the SDK's narrower type.
-        return innerFetch(new Request(request, { headers }));
+        return innerFetch(...forwardInit(input, init, request, { headers }));
     };
 }
 /**
@@ -163,7 +194,7 @@ function createProviderTokenFetch(serverUrl, provider, providerToken, delegate) 
     return async (input, init) => {
         const request = new Request(input, init);
         if (new URL(request.url).origin !== origin)
-            return innerFetch(request);
+            return innerFetch(...forwardInit(input, init, request));
         const token = await providerToken(provider);
         // Without a token the request is not sent; the 401 marks the server as needing sign-in.
         if (!token)
@@ -176,7 +207,7 @@ function createProviderTokenFetch(serverUrl, provider, providerToken, delegate) 
             // The Headers error quotes the value, so it must not surface.
             throw new TypeError(`Pi provider "${provider}" returned a token that is not a valid header value`);
         }
-        return innerFetch(new Request(request, { headers, redirect: "error" }));
+        return innerFetch(...forwardInit(input, init, request, { headers, redirect: "error" }));
     };
 }
 export class McpServerManager {
@@ -936,6 +967,7 @@ export class McpServerManager {
             const connection = {
                 client,
                 transport,
+                requestMetadata: () => clientMetadata.get(client)?.(),
                 definition,
                 tools: [],
                 toolsRevision: 0,
@@ -1151,7 +1183,7 @@ export class McpServerManager {
         const capabilities = this.buildClientCapabilities();
         const versionNegotiation = resolveVersionNegotiation(definition);
         let client;
-        client = new Client({ name: `pi-mcp-${serverName}`, version: "1.0.0" }, {
+        client = new AdapterClient({ name: `pi-mcp-${serverName}`, version: "1.0.0" }, {
             jsonSchemaValidator: createJsonSchemaValidator(),
             ...(versionNegotiation ? { versionNegotiation } : {}),
             ...(Object.keys(capabilities).length > 0 ? { capabilities } : {}),
@@ -1173,6 +1205,7 @@ export class McpServerManager {
                 },
             },
         });
+        clientMetadata.set(client, () => client.requestMetadata());
         if (this.samplingConfig) {
             registerSamplingHandler(client, { ...this.samplingConfig, serverName });
         }
@@ -1788,7 +1821,7 @@ export class McpServerManager {
         const connection = this.connections.get(name);
         if (!connection || connection.status !== "connected")
             return false;
-        if (connection.inFlight > 0)
+        if (connection.inFlight > 0 || (connection.activeProtocolOperations ?? 0) > 0)
             return false;
         return (Date.now() - connection.lastUsedAt) > timeoutMs;
     }

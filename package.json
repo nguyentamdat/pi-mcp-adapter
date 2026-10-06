@@ -1,6 +1,6 @@
 {
   "name": "pi-mcp-adapter",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "MCP (Model Context Protocol) adapter extension for Pi coding agent",
   "type": "module",
   "types": "./index.ts",
@@ -87,6 +87,7 @@
     "utils.ts",
     "abort.ts",
     "runtime-owner.ts",
+    "runtime-protocol.ts",
     "tool-metadata.ts",
     "ts-shape.ts",
     "output-shape.ts",
@@ -205,12 +206,6 @@
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-ai": {
-      "optional": true
-    },
-    "@earendil-works/pi-tui": {
-      "optional": true
-    },
-    "typebox": {
       "optional": true
     }
   },
