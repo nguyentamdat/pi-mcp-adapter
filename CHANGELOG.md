@@ -7,19 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-10-09
+
+### Highlights
+
+- Fixes the MCP SDK security advisory GHSA-6qxp-vccf-f47h, so a malicious MCP server can no longer collect the tokens saved from an earlier sign-in.
+- When the model lists a server's tools, it now sees each tool's parameter names, so fewer calls fail on guessed argument names.
+- `pi-mcp-adapter doctor` now agrees with Pi about which project servers are trusted.
+- Jev semantic search can use a System One server running on your own machine.
+
 ### Changed
 
-- `mcp({ server })` now shows each tool's parameter names, required ones first, as in `- get_record(record_id, fields?) - ...`. Models that listed a server's tools and then called one used to guess argument names, such as `id` for `record_id`, and spend a turn on the validation error. Types and nested fields are still only in `describe`. Thanks to [@rakesh-vs](https://github.com/rakesh-vs) for [PR #817](https://github.com/nicobailon/pi-mcp-adapter/pull/817).
+- `mcp({ server })` now lists each tool's parameter names, required ones first, for example `get_record(record_id, fields?)`. Models used to guess names like `id` for `record_id` and lose a turn to the validation error. Types and nested fields are still shown only by `describe`. Thanks to [@rakesh-vs](https://github.com/rakesh-vs) for [PR #817](https://github.com/nicobailon/pi-mcp-adapter/pull/817).
 
 ### Fixed
 
-- `SYSTEMONE_ENDPOINT` can now point at a System One server on your own machine, such as `http://127.0.0.1:8080/v1/systemone`. Plain `http` used to be rejected everywhere; it is now accepted on `localhost`, `127.0.0.0/8`, and `[::1]`, and every other endpoint still needs `https`. A local server that ignores keys still needs a non-empty `SYSTEMONE_API_KEY`. Thanks to [@amchen2310](https://github.com/amchen2310) for reporting it in [#810](https://github.com/nicobailon/pi-mcp-adapter/issues/810).
-- Running Pi with `--mcp-config <file>` (or giving `createMcpAdapter()` a `configPath`) no longer adds `"-builtin:mcp"` to Pi's user `settings.json`. A one-off process like `pi -e <adapter> --mcp-config <file> -p ...` doesn't need it, because Pi already leaves its built-in MCP out of that process. Installed adapters without an explicit config path still turn the built-in off as before. Thanks to [@deniskern](https://github.com/deniskern) for reporting it in [#811](https://github.com/nicobailon/pi-mcp-adapter/issues/811).
-- `pi-mcp-adapter doctor` no longer reports project servers as blocked by project trust when a Pi session in the same directory would trust the project. It now loads Pi from the `pi` on PATH when the adapter is installed as a Pi package, and it trusts a project with no trust-requiring Pi resources, as Pi does. Thanks to [@felipe-saavedra](https://github.com/felipe-saavedra) for reporting it in [#809](https://github.com/nicobailon/pi-mcp-adapter/issues/809).
+- `pi-mcp-adapter doctor` no longer reports project servers as blocked by project trust when a Pi session in the same folder would trust the project. When the adapter is installed as a Pi package, the doctor now finds Pi through the `pi` on your PATH. Like Pi, it trusts a project that has no Pi-specific project files, such as `.pi/settings.json`. Thanks to [@felipe-saavedra](https://github.com/felipe-saavedra) for reporting it in [#809](https://github.com/nicobailon/pi-mcp-adapter/issues/809).
+- Running Pi once with `--mcp-config <file>`, for example `pi -e <adapter> --mcp-config <file> -p ...`, no longer adds `"-builtin:mcp"` to your Pi `settings.json`. The same goes for a `configPath` passed to `createMcpAdapter()`. Pi already leaves its built-in MCP out of those runs. An installed adapter without a config path still turns the built-in off once, as before. Thanks to [@deniskern](https://github.com/deniskern) for reporting it in [#811](https://github.com/nicobailon/pi-mcp-adapter/issues/811).
+- `SYSTEMONE_ENDPOINT` can point at a System One server on your own machine, such as `http://127.0.0.1:8080/v1/systemone`. Plain `http` is accepted only on `localhost`, `127.0.0.0/8`, and `[::1]`; every other endpoint still needs `https`. A local server that ignores keys still needs some non-empty `SYSTEMONE_API_KEY`. Thanks to [@amchen2310](https://github.com/amchen2310) for reporting it in [#810](https://github.com/nicobailon/pi-mcp-adapter/issues/810).
 
 ### Security
 
-- The MCP client packages are now 2.3.1, which fixes [GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h). With 2.0.0, a malicious or compromised MCP server could name its own authorization server and receive the refresh token and client secret saved from an earlier sign-in. With this SDK, a server URL that redirects to a different origin is no longer followed, so configure the final URL instead; a redirect from `http` to `https` on the same host still works. Thanks to [@cash-flow-king](https://github.com/cash-flow-king) for reporting it in [#816](https://github.com/nicobailon/pi-mcp-adapter/issues/816) and to [@rakesh-vs](https://github.com/rakesh-vs) for [PR #819](https://github.com/nicobailon/pi-mcp-adapter/pull/819).
+- The MCP SDK packages move from 2.0.0 to 2.3.1, which fixes [GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h). With 2.0.0, a malicious or compromised MCP server could point sign-in at its own authorization server and receive the refresh token and client secret saved from an earlier sign-in. `npm audit` no longer flags the adapter. One side effect: a server URL that redirects to a different host is no longer followed, so put the final URL in your config. A redirect from `http` to `https` on the same host still works. Thanks to [@cash-flow-king](https://github.com/cash-flow-king) for reporting it in [#816](https://github.com/nicobailon/pi-mcp-adapter/issues/816) and to [@rakesh-vs](https://github.com/rakesh-vs) for [PR #819](https://github.com/nicobailon/pi-mcp-adapter/pull/819).
 
 ## [5.1.0] - 2026-10-05
 
