@@ -493,7 +493,7 @@ export interface ServerEntry {
   searchKeywords?: Record<string, string[]>;
   // Require interactive approval before calling matching MCP tools/resources.
   approveTools?: boolean | "destructive" | string[];
-  /** Set to false to never open MCP App UIs for this server's tools; results stay inline. */
+  /** Set to false to tell this server the host has no MCP App UI; its tools run and return results inline. */
   openUi?: boolean;
   // Debug
   debug?: boolean;  // Show server stderr (default: false)
@@ -785,8 +785,17 @@ export interface ServerProvenance {
   path: string;
   kind: "user" | "project" | "import";
   importKind?: string;
-  /** Settings from Pi's `mcp.json` that the adapter could not translate for this server. */
+  /** Settings from Pi's `mcp.json` that the adapter could not translate, or that OpenCode ignores in an imported server. */
   ignoredSettings?: string[];
+  /** Set when `ignoredSettings` came from an imported OpenCode server rather than Pi's `mcp.json`. */
+  ignoredSettingsSource?: "opencode";
+}
+
+/** The line `/mcp-adapter` and `doctor` show for a server's ignored settings. */
+export function describeIgnoredSettings(provenance: ServerProvenance | undefined): string | undefined {
+  if (!provenance?.ignoredSettings) return undefined;
+  const file = provenance.ignoredSettingsSource === "opencode" ? "OpenCode" : "Pi mcp.json";
+  return `Ignored ${file} settings: ${provenance.ignoredSettings.join(", ")}`;
 }
 
 export interface McpAuthResult {
