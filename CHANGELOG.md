@@ -7,11 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-10-19
+
+### Highlights
+
+- Scripts that open Pi in a new git worktree can start a trusted project's MCP servers with `pi --mcp-project-servers allow` instead of hanging on an approval prompt nobody sees.
+- MCP servers now see the project you're working in, the same way Pi's built-in MCP shows it to them.
+- A server that sends the same data twice in each result can be told to send it once, which saves context on every call.
+- When a remote server misbehaves, its log messages are now saved to `~/.pi/agent/mcp.log` instead of being thrown away.
+
 ### Added
 
 - `pi --mcp-project-servers allow` starts a trusted project's MCP servers without the approval prompt, for that process only. Scripts that open interactive Pi sessions in new git worktrees no longer stall on a prompt nobody sees when a branch changes `.mcp.json`. Untrusted projects stay blocked, and a hand-typed `pi` still asks. Thanks to [@woksin](https://github.com/woksin) for [#852](https://github.com/nicobailon/pi-mcp-adapter/issues/852).
 - MCP servers that ask for roots now get the Pi session directory, as they do with Pi's built-in MCP. Servers that scope their work to the client's workspace, such as file and code-search servers, now see the project you're in. The official filesystem server replaces the directories in its args with these roots; set `"roots": false` on its entry to keep them.
+- `"appendStructuredContent": false` on a server shows the model only a tool result's `content` when it has any, instead of also appending `structuredContent` after it. Servers that put a short answer in `content` and a large machine payload in `structuredContent` no longer cost that payload in context on every call. Results with empty `content` still show `structuredContent`. Thanks to [@marcoskichel](https://github.com/marcoskichel) for [#859](https://github.com/nicobailon/pi-mcp-adapter/pull/859).
 - Log messages MCP servers send are now appended to `~/.pi/agent/mcp.log`, the file and format Pi's built-in MCP uses, so a remote server that misbehaves leaves a trail. Before, they were dropped. The file moves to `mcp.log.1` past 5 MB. Nothing is added to the model's context.
+
+### Fixed
+
+- With `settings.freezeDirectTools` on, the "direct tools frozen after initial sync" message no longer prints over Pi's input editor when MCP starts, which could look like text you never typed. It now shows only with `MCP_UI_DEBUG=1`. Thanks to [@VoidInTheShell](https://github.com/VoidInTheShell) for [#858](https://github.com/nicobailon/pi-mcp-adapter/pull/858).
 
 ## [5.3.2] - 2026-10-17
 
