@@ -1,4 +1,4 @@
-import { Client, type GetPromptResult, type ListToolsResult, type ReadResourceResult, type McpSubscription, type SubscriptionFilter, type RequestOptions, type UrlElicitationRequiredError } from "@modelcontextprotocol/client";
+import { Client, type GetPromptResult, type ListToolsResult, type ReadResourceResult, type McpSubscription, type SubscriptionFilter, type ElicitRequestFormParams, type ElicitRequestURLParams, type ElicitResult, type RequestOptions, type UrlElicitationRequiredError } from "@modelcontextprotocol/client";
 import { type McpTool, type McpResource, type McpPrompt, type ServerDefinition, type ServerStreamResultPatchNotification, type Transport, type McpTraceSettings, type McpListenState } from "./types.ts";
 import { type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import { type AuthStorageOptions } from "./mcp-auth.ts";
@@ -89,6 +89,13 @@ export declare class McpServerManager {
     setListenStateChangedListener(listener: ListenStateChangedListener | undefined): void;
     publishMetadataChanged(name: string, expectedConnection: ServerConnection, reason: string): boolean;
     setElicitationConfig(config: ServerElicitationConfig | undefined): void;
+    /** Shows a server-supplied MCP form with Pi's dialogs. Undefined when this session cannot prompt. */
+    promptFormElicitation(name: string, params: ElicitRequestFormParams, signal?: AbortSignal): Promise<ElicitResult | undefined>;
+    /**
+     * A prompt that shows an adapter-supplied URL with the URL-elicitation consent dialog and opens
+     * it on accept. Undefined when this session cannot open URLs: headless, non-TUI or shut down.
+     */
+    urlElicitationPrompt(name: string): ((params: ElicitRequestURLParams, signal?: AbortSignal) => Promise<ElicitResult>) | undefined;
     setRuntimeSignal(signal: AbortSignal | undefined): void;
     setDefaultRequestTimeoutMs(timeoutMs: number | undefined): void;
     setTraceConfig(settings: McpTraceSettings | undefined): void;
